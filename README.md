@@ -32,9 +32,12 @@ All resources use schema version `1.0`:
 - `validatedTriage`: a validated, untrusted, recommendation-only output.
 
 Resource IDs are stable logical names (`normalized-`, `request-`, and `triage-`
-plus `requestId`) in Swamp's versioned store. Reusing a request ID intentionally
-creates a newer version rather than claiming immutable replay; callers that need
-idempotency must reuse the previously returned data handle or choose a unique ID.
+plus `requestId`) in Swamp's versioned store. Given identical validated inputs,
+resource payloads are deterministic: normalization uses the envelope receipt
+time, preparation uses the latest normalization time, and validation records the
+agent output time. Reusing a request ID may create another identical stored
+version; callers that require write-once semantics must reuse the previously
+returned data handle or choose a unique ID.
 
 The model is intentionally adapter-free. A caller that sends `request.prompt`
 to an agent is responsible for its provider, sandbox, transport, and audit

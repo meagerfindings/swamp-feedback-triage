@@ -106,6 +106,16 @@ export function validateArtifacts(
     if (!result.success) {
       fail(`Invalid normalized artifact at index ${index}`, result.diagnostics);
     }
+    if (
+      result.data.provenance.normalizer !== "feedback-triage" ||
+      result.data.provenance.normalizerVersion !==
+        FEEDBACK_TRIAGE_MODEL_VERSION ||
+      result.data.redaction.methodVersion !== FEEDBACK_TRIAGE_MODEL_VERSION
+    ) {
+      fail(
+        `Artifact provenance is not from this model: ${result.data.feedbackId}`,
+      );
+    }
     return result.data;
   });
   const seen = new Set<string>();
@@ -144,13 +154,14 @@ const REDACTION_RULES = [
 /** Normalizes and pattern-redacts one isolated ingestion envelope. */
 export function normalizeEnvelope(
   input: unknown,
-  normalizedAt = new Date(),
+  normalizedAt?: Date,
 ): NormalizedFeedbackArtifact {
   const result = validateFeedbackIngestionEnvelope(input);
   if (!result.success) {
     fail("Invalid isolated feedback ingestion envelope", result.diagnostics);
   }
   const envelope: FeedbackIngestionEnvelope = result.data;
+  normalizedAt ??= new Date(envelope.receivedAt);
   let normalizedText = envelope.rawFeedback.normalize("NFKC").replace(
     /\s+/g,
     " ",
@@ -237,10 +248,17 @@ export async function sha256(value: string): Promise<string> {
 export async function prepareRequest(
   requestId: string,
   input: readonly unknown[],
-  now = new Date(),
+  now?: Date,
 ): Promise<PreparedRequest> {
   SafeId.parse(requestId);
   const artifacts = validateArtifacts(input);
+  now ??= new Date(
+    Math.max(
+      ...artifacts.map((artifact) =>
+        Date.parse(artifact.provenance.normalizedAt)
+      ),
+    ),
+  );
   const prompt = buildPrompt(artifacts);
   const bytes = new TextEncoder().encode(prompt).byteLength;
   if (bytes > MAX_PROMPT_BYTES) {
@@ -318,7 +336,7 @@ export async function validateAgentResult(
     requestId,
     output,
     artifactIds: request.artifactIds,
-    validatedAt: now.toISOString(),
+    validatedAt: output.generatedAt,
     authority: {
       sideEffects: "none",
       mayContactUsers: false,
@@ -334,6 +352,9 @@ type WriteContext = {
     name: string,
     data: Record<string, unknown>,
   ) => Promise<unknown>;
+  logger: {
+    info: (message: string, properties: Record<string, unknown>) => void;
+  };
 };
 
 /** Swamp model definition for normalization, preparation, and validation. */
@@ -371,11 +392,20 @@ export const model = {
         args: z.infer<typeof normalizeArgumentsSchema>,
         context: WriteContext,
       ) => {
-        const normalizedAt = new Date();
+        context.logger.info("Normalizing {count} feedback envelopes", {
+          count: args.envelopes.length,
+        });
         const artifacts = args.envelopes.map((envelope) =>
-          normalizeEnvelope(envelope, normalizedAt)
+          normalizeEnvelope(envelope)
         );
         validateArtifacts(artifacts);
+        const normalizedAt = new Date(
+          Math.max(
+            ...artifacts.map((artifact) =>
+              Date.parse(artifact.provenance.normalizedAt)
+            ),
+          ),
+        );
         const batch = normalizedBatchSchema.parse({
           schemaVersion: FEEDBACK_TRIAGE_SCHEMA_VERSION,
           requestId: args.requestId,
@@ -388,6 +418,9 @@ export const model = {
           `normalized-${args.requestId}`,
           batch,
         );
+        context.logger.info("Normalized feedback request {requestId}", {
+          requestId: args.requestId,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -399,12 +432,18 @@ export const model = {
         args: z.infer<typeof prepareArgumentsSchema>,
         context: WriteContext,
       ) => {
+        context.logger.info("Preparing feedback request {requestId}", {
+          requestId: args.requestId,
+        });
         const request = await prepareRequest(args.requestId, args.artifacts);
         const handle = await context.writeResource(
           "request",
           `request-${args.requestId}`,
           request,
         );
+        context.logger.info("Prepared feedback request {requestId}", {
+          requestId: args.requestId,
+        });
         return { dataHandles: [handle] };
       },
     },
@@ -416,6 +455,9 @@ export const model = {
         args: z.infer<typeof validateArgumentsSchema>,
         context: WriteContext,
       ) => {
+        context.logger.info("Validating feedback triage {requestId}", {
+          requestId: args.requestId,
+        });
         const triage = await validateAgentResult(
           args.requestId,
           args.request,
@@ -426,6 +468,9 @@ export const model = {
           `triage-${args.requestId}`,
           triage,
         );
+        context.logger.info("Validated feedback triage {requestId}", {
+          requestId: args.requestId,
+        });
         return { dataHandles: [handle] };
       },
     },

@@ -5,7 +5,12 @@ export const MAX_TEXT_LENGTH = 10_000;
 export const REDACTION_LIMITATION =
   "pattern-based redaction does not guarantee detection of all private information" as const;
 
-const Id = z.string().trim().min(1).max(200);
+const MAX_COLLECTION_ITEMS = 50;
+const Id = z.string().regex(
+  /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/,
+  "must be a stable safe ID",
+);
+const Version = z.string().regex(/^\d{4}\.\d{2}\.\d{2}\.\d+$/);
 const Text = z.string().trim().min(1).max(MAX_TEXT_LENGTH);
 const Timestamp = z.iso.datetime({ offset: true });
 const Confidence = z.number().finite().min(0).max(1);
@@ -44,7 +49,7 @@ export type FeedbackIngestionEnvelope = z.infer<
 
 const Redaction = z.strictObject({
   method: z.literal("deterministic-redaction"),
-  methodVersion: Id,
+  methodVersion: Version,
   performedAt: Timestamp,
   inputEnvelopeId: Id,
   categoriesRemoved: z.array(
@@ -65,13 +70,15 @@ export const normalizedFeedbackArtifactSchema = z.strictObject({
   feedbackId: Id,
   sourceId: Id,
   normalizedText: Text,
-  labels: z.array(Id).superRefine(unique("duplicate label")),
+  labels: z.array(Id).max(MAX_COLLECTION_ITEMS).superRefine(
+    unique("duplicate label"),
+  ),
   provenance: z.strictObject({
     inputEnvelopeId: Id,
     sourceId: Id,
     normalizedAt: Timestamp,
     normalizer: Id,
-    normalizerVersion: Id,
+    normalizerVersion: Version,
   }),
   redaction: Redaction,
   handling: z.strictObject({
@@ -80,6 +87,13 @@ export const normalizedFeedbackArtifactSchema = z.strictObject({
     toolCapableAgentEligible: z.literal(false),
   }),
 }).superRefine((artifact, context) => {
+  if (artifact.feedbackId !== artifact.provenance.inputEnvelopeId) {
+    context.addIssue({
+      code: "custom",
+      path: ["provenance", "inputEnvelopeId"],
+      message: "provenance inputEnvelopeId must match feedbackId",
+    });
+  }
   if (artifact.sourceId !== artifact.provenance.sourceId) {
     context.addIssue({
       code: "custom",
@@ -137,15 +151,17 @@ const DuplicateLink = z.strictObject({
   feedbackId: Id,
   duplicateOfFeedbackId: Id,
   confidence: Confidence,
-  evidence: z.array(Evidence).min(1),
+  evidence: z.array(Evidence).min(1).max(MAX_COLLECTION_ITEMS),
 });
 const Theme = z.strictObject({
   themeId: Id,
   title: Text,
   summary: Text,
   confidence: Confidence,
-  feedbackIds: z.array(Id).min(1).superRefine(unique("duplicate feedbackId")),
-  evidence: z.array(Evidence).min(1),
+  feedbackIds: z.array(Id).min(1).max(MAX_COLLECTION_ITEMS).superRefine(
+    unique("duplicate feedbackId"),
+  ),
+  evidence: z.array(Evidence).min(1).max(MAX_COLLECTION_ITEMS),
 });
 
 export const feedbackTriageOutputSchema = z.strictObject({
@@ -153,20 +169,22 @@ export const feedbackTriageOutputSchema = z.strictObject({
   triageId: Id,
   generatedAt: Timestamp,
   trust: z.literal("untrusted-agent-output"),
-  sourceFeedbackIds: z.array(Id).min(1).superRefine(
+  sourceFeedbackIds: z.array(Id).min(1).max(MAX_COLLECTION_ITEMS).superRefine(
     unique("duplicate source feedbackId"),
   ),
-  duplicateLinks: z.array(DuplicateLink),
-  themes: z.array(Theme),
+  duplicateLinks: z.array(DuplicateLink).max(MAX_COLLECTION_ITEMS),
+  themes: z.array(Theme).max(MAX_COLLECTION_ITEMS),
   recommendations: z.array(z.strictObject({
     recommendationId: Id,
     draft: Text,
     confidence: Confidence,
-    themeIds: z.array(Id).min(1).superRefine(unique("duplicate themeId")),
-    evidence: z.array(Evidence).min(1),
+    themeIds: z.array(Id).min(1).max(MAX_COLLECTION_ITEMS).superRefine(
+      unique("duplicate themeId"),
+    ),
+    evidence: z.array(Evidence).min(1).max(MAX_COLLECTION_ITEMS),
     audience: z.literal("internal"),
     disposition: z.literal("recommendation-only"),
-  })),
+  })).max(MAX_COLLECTION_ITEMS),
   authority: z.strictObject({
     sideEffects: z.literal("none"),
     mayContactUsers: z.literal(false),
@@ -337,7 +355,7 @@ function validate<T>(
     }));
   const diagnostics = [
     ...schemaDiagnostics,
-    ...(scan ? leakageDiagnostics(input) : []),
+    ...(scan && parsed.success ? leakageDiagnostics(parsed.data) : []),
   ].sort((a, b) =>
     a.path.localeCompare(b.path) || a.code.localeCompare(b.code) ||
     a.message.localeCompare(b.message)

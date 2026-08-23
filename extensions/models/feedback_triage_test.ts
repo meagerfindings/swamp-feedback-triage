@@ -109,12 +109,13 @@ Deno.test("prepared prompts are deterministic, bounded, and prohibit contact and
   const request = await prepareRequest(
     "request-1",
     [artifact],
-    new Date("2026-08-23T10:00:00Z"),
   );
   assert(request.prompt === buildPrompt([artifact]));
   assert(request.prompt.includes("Do not contact users"));
   assert(request.prompt.includes("Use no tools"));
   assert(request.prompt.length <= 120_000);
+  const replay = await prepareRequest("request-1", [artifact]);
+  assert(JSON.stringify(replay) === JSON.stringify(request));
 });
 
 Deno.test("leakage, contact intent, authority, and ungrounded evidence fail closed", async () => {
@@ -162,15 +163,44 @@ Deno.test("rejects output generated after validation time", async () => {
   );
 });
 
+Deno.test("rejects tampered provenance, prompt, hash, IDs, and malformed output", async () => {
+  const artifact = normalizeEnvelope(envelope("Please add a dark display"));
+  const request = await prepareRequest("request-1", [artifact]);
+  await rejects(
+    () => prepareRequest("request-1", [{
+      ...artifact,
+      provenance: { ...artifact.provenance, inputEnvelopeId: "feedback-2" },
+    }]),
+    "Invalid normalized artifact",
+  );
+  await rejects(
+    () => validateAgentResult("request-1", { ...request, promptHash: "0".repeat(64) }, output()),
+    "hash is invalid",
+  );
+  await rejects(
+    () => validateAgentResult("request-1", { ...request, prompt: `${request.prompt}x` }, output()),
+    "does not exactly match",
+  );
+  await rejects(
+    () => validateAgentResult("request-2", request, output()),
+    "does not match",
+  );
+  await rejects(
+    () => validateAgentResult("request-1", request, { ...output(), unexpected: true }),
+    "Invalid triage output",
+  );
+});
+
 Deno.test("model writes only a redacted batch before any adapter exists", async () => {
   const writes: Array<{ spec: string; data: Record<string, unknown> }> = [];
   await model.methods.normalize.execute({
     requestId: "request-1",
     envelopes: [envelope("synthetic@example.invalid asks for a dark display")],
   }, {
-    writeResource: async (spec, _name, data) => {
+    logger: { info: () => {} },
+    writeResource: (spec, _name, data) => {
       writes.push({ spec, data });
-      return { name: spec };
+      return Promise.resolve({ name: spec });
     },
   });
   assert(writes.length === 1);
