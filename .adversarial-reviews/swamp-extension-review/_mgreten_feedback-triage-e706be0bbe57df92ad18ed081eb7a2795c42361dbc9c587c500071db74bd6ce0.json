@@ -1,0 +1,20 @@
+{
+  "extension": "@mgreten/feedback-triage", "version": "2026.08.23.1", "reviewedAt": "2026-08-23T15:09:04Z",
+  "dimensions": [
+    { "id": "credentials-secrets", "verdict": "na", "note": "No credentials or adapter configuration." },
+    { "id": "logging-quality", "verdict": "issue", "note": "normalize, prepare, and validate have no structured entry or completion logging." },
+    { "id": "error-handling", "verdict": "pass", "note": "Privacy, size, chronology, grounding, and authority checks precede writes." },
+    { "id": "testing-completeness", "verdict": "pass", "note": "Redaction, limits, prompt, leakage, chronology, and persistence are tested." },
+    { "id": "idempotency-resilience", "verdict": "issue", "note": "Stable request IDs intentionally create newer versions; callers must retain handles or ensure unique IDs." },
+    { "id": "api-contracts", "verdict": "na", "note": "No external API calls." },
+    { "id": "resource-management", "verdict": "na", "note": "No workspaces, files, or external handles." },
+    { "id": "published-surface-hygiene", "verdict": "pass", "note": "README example is explicitly synthetic." },
+    { "id": "schema-strictness", "verdict": "pass", "note": "Public, persisted, and nested object schemas are strict." },
+    { "id": "lifetime-gc", "verdict": "pass", "note": "All three resources declare 30-day lifetime and GC retention." },
+    { "id": "crud-completeness", "verdict": "na", "note": "Bounded triage pipeline, not external CRUD." },
+    { "id": "preflight-checks", "verdict": "na", "note": "No external mutation." },
+    { "id": "instance-names", "verdict": "pass", "note": "Normalized, request, and triage resources use distinct prefixes." },
+    { "id": "data-access", "verdict": "na", "note": "Pipeline receives prior artifacts explicitly rather than reading state." },
+    { "id": "version-upgrades", "verdict": "na", "note": "Initial standalone version." }
+  ]
+}
