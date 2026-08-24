@@ -1,0 +1,82 @@
+{
+  "extension": "@mgreten/feedback-triage",
+  "version": "2026.08.23.1",
+  "reviewedAt": "2026-08-24T03:28:29Z",
+  "dimensions": [
+    {
+      "id": "credentials-secrets",
+      "verdict": "pass",
+      "note": "The model has no credential arguments or external adapter; globals contain only a bounded /tmp path and prompt byte limit, and persisted audit data contains invocation metadata rather than secrets."
+    },
+    {
+      "id": "logging-quality",
+      "verdict": "pass",
+      "note": "normalize, prepare, and validate each emit structured info logs on entry and after the sole successful write; properties are counts or safe request IDs, never feedback text or audit payloads."
+    },
+    {
+      "id": "error-handling",
+      "verdict": "pass",
+      "note": "All parsing, prompt/hash binding, provenance, audit-binding, chronology, and evidence-grounding checks complete before writeResource; failures throw descriptive TypeError or Zod errors and no catch suppresses them."
+    },
+    {
+      "id": "testing-completeness",
+      "verdict": "pass",
+      "note": "Eleven focused Deno tests cover redaction, limits, isolation, determinism, leakage, chronology, tampering, each write path, retained legacy shapes, strict audited inputs, audit mismatch, and rejection of leaked or forged legacy artifacts."
+    },
+    {
+      "id": "idempotency-resilience",
+      "verdict": "pass",
+      "note": "The model performs no external mutation; stable instance names and timestamps derived from inputs make adapter-free normalize/prepare writes deterministic, while validation writes only after every check succeeds."
+    },
+    {
+      "id": "api-contracts",
+      "verdict": "na",
+      "note": "No HTTP client, provider SDK, external API, pagination, or rate-limited endpoint exists; adapter execution is explicitly caller-owned."
+    },
+    {
+      "id": "resource-management",
+      "verdict": "na",
+      "note": "Methods open no files, sockets, subprocesses, or cloud resources; agentCwd is retained as launch-audit metadata and is neither created nor managed here."
+    },
+    {
+      "id": "published-surface-hygiene",
+      "verdict": "pass",
+      "note": "README and tests use synthetic IDs, example.invalid, and /tmp fixture paths; no real hostnames, IPs, account IDs, credentials, or internal topology appear in published files."
+    },
+    {
+      "id": "schema-strictness",
+      "verdict": "pass",
+      "note": "All globals, arguments, resources, audit records, legacy records, and nested contracts use z.strictObject; unions retain only two explicit adapter-free/audited shapes and two explicit current/legacy artifact shapes."
+    },
+    {
+      "id": "lifetime-gc",
+      "verdict": "pass",
+      "note": "normalizedBatch, request, and validatedTriage each declare lifetime 30d and garbageCollection 10."
+    },
+    {
+      "id": "crud-completeness",
+      "verdict": "na",
+      "note": "This is a local transformation pipeline producing immutable versioned artifacts, not a CRUD lifecycle wrapper around a mutable external resource."
+    },
+    {
+      "id": "preflight-checks",
+      "verdict": "na",
+      "note": "No method mutates an external system; normalize, prepare, and validate are pure validation/transformation methods followed by one local versioned-store write."
+    },
+    {
+      "id": "instance-names",
+      "verdict": "pass",
+      "note": "Mechanical enumeration found one writer per spec: normalize writes normalized-<requestId>, prepare writes request-<requestId>, and validate writes triage-<requestId>; prefixes prevent cross-spec collisions."
+    },
+    {
+      "id": "data-access",
+      "verdict": "na",
+      "note": "No method reads stored state or accesses dataRepository directly; inputs are explicitly supplied and outputs are written through context.writeResource."
+    },
+    {
+      "id": "version-upgrades",
+      "verdict": "na",
+      "note": "The repair keeps model version 2026.08.23.1 and the registry reports no previously published version; compatibility is handled by strict retained schemas rather than a version-bump migration."
+    }
+  ]
+}

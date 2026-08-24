@@ -7,6 +7,7 @@ import {
   type NormalizedFeedbackArtifact,
   normalizedFeedbackArtifactSchema,
   REDACTION_LIMITATION,
+  validateFeedbackContentSafety,
   validateFeedbackIngestionEnvelope,
   validateFeedbackTriageOutput,
   validateNormalizedFeedbackArtifact,
@@ -16,24 +17,120 @@ import {
 export const FEEDBACK_TRIAGE_MODEL_VERSION = "2026.08.23.1" as const;
 const MAX_ARTIFACTS = 50;
 const MAX_PROMPT_BYTES = 120_000;
+const DEFAULT_AGENT_CWD = "/tmp/feedback-triage-agent";
 const SafeId = z.string().regex(
   /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/,
   "must be a stable safe ID",
 );
 const Timestamp = z.iso.datetime({ offset: true });
 
+/** Optional adapter-launch settings retained for same-type upgrades. */
+export const globalArgumentsSchema = z.strictObject({
+  agentCwd: z.string().default(DEFAULT_AGENT_CWD).superRefine(
+    (path, context) => {
+      if (
+        !(path === "/tmp" || path.startsWith("/tmp/")) ||
+        path.split("/").includes("..")
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "agentCwd must be an absolute path under /tmp",
+        });
+      }
+    },
+  ),
+  maxPromptBytes: z.number().int().positive().max(MAX_PROMPT_BYTES).default(
+    MAX_PROMPT_BYTES,
+  ),
+});
+
+const legacyRedactionSchema = z.strictObject({
+  method: z.literal("deterministic-redaction"),
+  methodVersion: z.literal("2026.08.17.1"),
+  performedAt: Timestamp,
+  inputEnvelopeId: z.string().trim().min(1).max(200),
+  categoriesRemoved: z.array(z.enum([
+    "email",
+    "phone",
+    "address",
+    "account_identifier",
+    "credential",
+    "freeform_private_content",
+  ])),
+  replacementCount: z.number().int().nonnegative(),
+  reviewStatus: z.enum(["not_reviewed", "synthetic_fixture_reviewed"]),
+  limitations: z.literal(REDACTION_LIMITATION),
+});
+
+/** Exact pre-extraction artifact shape retained for persisted-data compatibility. */
+export const legacyNormalizedFeedbackArtifactSchema = z.strictObject({
+  schemaVersion: z.literal(FEEDBACK_TRIAGE_SCHEMA_VERSION),
+  feedbackId: z.string().trim().min(1).max(200),
+  sourceId: z.string().trim().min(1).max(200),
+  normalizedText: z.string().trim().min(1).max(10_000),
+  labels: z.array(z.string().trim().min(1).max(200)),
+  provenance: z.strictObject({
+    inputEnvelopeId: z.string().trim().min(1).max(200),
+    sourceId: z.string().trim().min(1).max(200),
+    normalizedAt: Timestamp,
+    normalizer: z.literal("moment-savor-feedback-triage"),
+    normalizerVersion: z.literal("2026.08.17.1"),
+  }),
+  redaction: legacyRedactionSchema,
+  handling: z.strictObject({
+    classification: z.literal("internal-redacted"),
+    rawTextIncluded: z.literal(false),
+    toolCapableAgentEligible: z.literal(true),
+  }),
+}).superRefine((artifact, context) => {
+  if (
+    artifact.feedbackId !== artifact.provenance.inputEnvelopeId ||
+    artifact.feedbackId !== artifact.redaction.inputEnvelopeId ||
+    artifact.sourceId !== artifact.provenance.sourceId
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["provenance"],
+      message: "legacy artifact identity and provenance must match",
+    });
+  }
+  for (const diagnostic of validateFeedbackContentSafety(artifact)) {
+    context.addIssue({
+      code: "custom",
+      path: diagnostic.path.split("."),
+      message: diagnostic.message,
+    });
+  }
+});
+
+/** Strict union of current and retained pre-extraction artifact identities. */
+export const compatibleNormalizedFeedbackArtifactSchema = z.union([
+  normalizedFeedbackArtifactSchema,
+  legacyNormalizedFeedbackArtifactSchema,
+]);
+type CompatibleNormalizedFeedbackArtifact = z.infer<
+  typeof compatibleNormalizedFeedbackArtifactSchema
+>;
+
 /** Persisted deterministic request containing only normalized redacted artifacts. */
-export const preparedRequestSchema = z.strictObject({
+const adapterFreePreparedRequestSchema = z.strictObject({
   schemaVersion: z.literal(FEEDBACK_TRIAGE_SCHEMA_VERSION),
   requestId: SafeId,
   prompt: z.string().min(1).max(MAX_PROMPT_BYTES),
   promptHash: z.string().regex(/^[a-f0-9]{64}$/),
   artifactIds: z.array(SafeId).min(1).max(MAX_ARTIFACTS),
-  artifacts: z.array(normalizedFeedbackArtifactSchema).min(1).max(
+  artifacts: z.array(compatibleNormalizedFeedbackArtifactSchema).min(1).max(
     MAX_ARTIFACTS,
   ),
   createdAt: Timestamp,
-}).superRefine((request, context) => {
+});
+const auditedPreparedRequestSchema = adapterFreePreparedRequestSchema.extend({
+  agentCwd: z.string().startsWith("/tmp/"),
+});
+export const preparedRequestSchema = z.union([
+  auditedPreparedRequestSchema,
+  adapterFreePreparedRequestSchema,
+]).superRefine((request, context) => {
   if (
     JSON.stringify(request.artifacts.map((artifact) => artifact.feedbackId)) !==
       JSON.stringify(request.artifactIds)
@@ -52,7 +149,7 @@ export type PreparedRequest = z.infer<typeof preparedRequestSchema>;
 export const normalizedBatchSchema = z.strictObject({
   schemaVersion: z.literal(FEEDBACK_TRIAGE_SCHEMA_VERSION),
   requestId: SafeId,
-  artifacts: z.array(normalizedFeedbackArtifactSchema).min(1).max(
+  artifacts: z.array(compatibleNormalizedFeedbackArtifactSchema).min(1).max(
     MAX_ARTIFACTS,
   ),
   normalizedAt: Timestamp,
@@ -63,7 +160,7 @@ export const normalizedBatchSchema = z.strictObject({
 });
 
 /** Persisted schema for validated recommendation-only triage output. */
-export const validatedTriageSchema = z.strictObject({
+const validatedTriageBaseSchema = z.strictObject({
   schemaVersion: z.literal(FEEDBACK_TRIAGE_SCHEMA_VERSION),
   requestId: SafeId,
   output: feedbackTriageOutputSchema,
@@ -77,19 +174,71 @@ export const validatedTriageSchema = z.strictObject({
   }),
 });
 
-const normalizeArgumentsSchema = z.strictObject({
+/** Runtime invocation evidence accepted only by audited validation mode. */
+export const invocationAuditSchema = z.strictObject({
+  invocationId: SafeId,
+  provider: z.string().trim().min(1).max(100),
+  model: z.string().trim().min(1).max(200),
+  promptHash: z.string().regex(/^[a-f0-9]{64}$/),
+  cwd: z.string().min(1),
+  success: z.boolean(),
+  costUsd: z.number().finite().nonnegative().nullable().default(null),
+  inputTokens: z.number().int().nonnegative().nullable().default(null),
+  outputTokens: z.number().int().nonnegative().nullable().default(null),
+});
+
+/** Readonly sandbox launch claim required by audited validation mode. */
+export const invocationClaimAuditSchema = z.strictObject({
+  operation: z.literal("invokeAndParse"),
+  invocationId: SafeId,
+  provider: z.literal("amp"),
+  model: z.string().trim().min(1).max(200),
+  cwd: z.string().min(1),
+  promptHash: z.string().regex(/^[a-f0-9]{64}$/),
+  toolProfile: z.literal("readonly"),
+  sandbox: z.strictObject({
+    mode: z.enum(["auto", "bwrap", "seatbelt"]),
+    provider: z.literal("amp"),
+    credentialAccess: z.enum(["provider", "isolated"]),
+    network: z.literal("allow"),
+    profilePath: z.string(),
+    required: z.literal(true),
+  }),
+});
+
+const auditedValidatedTriageSchema = validatedTriageBaseSchema.extend({
+  invocation: invocationAuditSchema,
+  invocationClaim: invocationClaimAuditSchema,
+});
+export const validatedTriageSchema = z.union([
+  auditedValidatedTriageSchema,
+  validatedTriageBaseSchema,
+]);
+
+export const normalizeArgumentsSchema = z.strictObject({
   requestId: SafeId,
   envelopes: z.array(z.unknown()).min(1).max(MAX_ARTIFACTS),
 });
-const prepareArgumentsSchema = z.strictObject({
+export const prepareArgumentsSchema = z.strictObject({
   requestId: SafeId,
   artifacts: z.array(z.unknown()).min(1).max(MAX_ARTIFACTS),
 });
-const validateArgumentsSchema = z.strictObject({
+const adapterFreeValidateArgumentsSchema = z.strictObject({
   requestId: SafeId,
   request: preparedRequestSchema,
   agentOutput: z.unknown(),
 });
+const auditedValidateArgumentsSchema = adapterFreeValidateArgumentsSchema
+  .extend({
+    request: auditedPreparedRequestSchema,
+    invocation: invocationAuditSchema,
+    invocationClaim: invocationClaimAuditSchema,
+  });
+/** Strict adapter-free or fully audited validation method inputs. */
+export const validateArgumentsSchema = z.union([
+  auditedValidateArgumentsSchema,
+  adapterFreeValidateArgumentsSchema,
+]);
 
 function fail(message: string, details?: unknown): never {
   throw new TypeError(
@@ -100,23 +249,15 @@ function fail(message: string, details?: unknown): never {
 /** Validates a bounded artifact list and rejects duplicate feedback IDs. */
 export function validateArtifacts(
   input: readonly unknown[],
-): NormalizedFeedbackArtifact[] {
+): CompatibleNormalizedFeedbackArtifact[] {
   const artifacts = input.map((artifact, index) => {
     const result = validateNormalizedFeedbackArtifact(artifact);
-    if (!result.success) {
+    if (result.success) return result.data;
+    const legacy = legacyNormalizedFeedbackArtifactSchema.safeParse(artifact);
+    if (!legacy.success) {
       fail(`Invalid normalized artifact at index ${index}`, result.diagnostics);
     }
-    if (
-      result.data.provenance.normalizer !== "feedback-triage" ||
-      result.data.provenance.normalizerVersion !==
-        FEEDBACK_TRIAGE_MODEL_VERSION ||
-      result.data.redaction.methodVersion !== FEEDBACK_TRIAGE_MODEL_VERSION
-    ) {
-      fail(
-        `Artifact provenance is not from this model: ${result.data.feedbackId}`,
-      );
-    }
-    return result.data;
+    return legacy.data;
   });
   const seen = new Set<string>();
   artifacts.forEach((artifact) => {
@@ -218,7 +359,7 @@ export function normalizeEnvelope(
 
 /** Builds the deterministic no-tools prompt from redacted artifacts. */
 export function buildPrompt(
-  artifacts: readonly NormalizedFeedbackArtifact[],
+  artifacts: readonly CompatibleNormalizedFeedbackArtifact[],
 ): string {
   const contract = z.toJSONSchema(feedbackTriageOutputSchema);
   return [
@@ -248,8 +389,15 @@ export async function sha256(value: string): Promise<string> {
 export async function prepareRequest(
   requestId: string,
   input: readonly unknown[],
+  globalsOrNow?: z.input<typeof globalArgumentsSchema> | Date,
   now?: Date,
 ): Promise<PreparedRequest> {
+  const adapterFree = globalsOrNow === undefined ||
+    globalsOrNow instanceof Date;
+  const settings = adapterFree
+    ? undefined
+    : globalArgumentsSchema.parse(globalsOrNow);
+  if (globalsOrNow instanceof Date) now = globalsOrNow;
   SafeId.parse(requestId);
   const artifacts = validateArtifacts(input);
   now ??= new Date(
@@ -261,8 +409,9 @@ export async function prepareRequest(
   );
   const prompt = buildPrompt(artifacts);
   const bytes = new TextEncoder().encode(prompt).byteLength;
-  if (bytes > MAX_PROMPT_BYTES) {
-    fail(`Prompt exceeds ${MAX_PROMPT_BYTES} byte budget (${bytes})`);
+  const maxPromptBytes = settings?.maxPromptBytes ?? MAX_PROMPT_BYTES;
+  if (bytes > maxPromptBytes) {
+    fail(`Prompt exceeds ${maxPromptBytes} byte budget (${bytes})`);
   }
   return preparedRequestSchema.parse({
     schemaVersion: FEEDBACK_TRIAGE_SCHEMA_VERSION,
@@ -271,6 +420,9 @@ export async function prepareRequest(
     promptHash: await sha256(prompt),
     artifactIds: artifacts.map((artifact) => artifact.feedbackId),
     artifacts,
+    ...(settings
+      ? { agentCwd: `${settings.agentCwd}/request-${requestId}` }
+      : {}),
     createdAt: now.toISOString(),
   });
 }
@@ -280,8 +432,17 @@ export async function validateAgentResult(
   requestId: string,
   requestInput: unknown,
   agentOutput: unknown,
+  auditOrNow:
+    | {
+      invocation: unknown;
+      invocationClaim: unknown;
+    }
+    | Date
+    | undefined = undefined,
   now = new Date(),
 ): Promise<z.infer<typeof validatedTriageSchema>> {
+  const audit = auditOrNow instanceof Date ? undefined : auditOrNow;
+  if (auditOrNow instanceof Date) now = auditOrNow;
   SafeId.parse(requestId);
   const request = preparedRequestSchema.parse(requestInput);
   if (request.requestId !== requestId) {
@@ -293,6 +454,37 @@ export async function validateAgentResult(
   }
   if (request.promptHash !== await sha256(request.prompt)) {
     fail("Prepared prompt hash is invalid");
+  }
+  let audited:
+    | {
+      invocation: z.infer<typeof invocationAuditSchema>;
+      invocationClaim: z.infer<typeof invocationClaimAuditSchema>;
+    }
+    | undefined;
+  if (audit !== undefined) {
+    if (!("agentCwd" in request)) {
+      fail("Audited validation requires an audited prepared request");
+    }
+    const invocation = invocationAuditSchema.parse(audit.invocation);
+    const invocationClaim = invocationClaimAuditSchema.parse(
+      audit.invocationClaim,
+    );
+    if (invocation.provider !== "amp" || !invocation.success) {
+      fail("Audited invocation must be a successful amp invocation");
+    }
+    if (
+      invocation.promptHash !== request.promptHash ||
+      invocation.cwd !== request.agentCwd ||
+      invocationClaim.invocationId !== invocation.invocationId ||
+      invocationClaim.model !== invocation.model ||
+      invocationClaim.cwd !== request.agentCwd ||
+      invocationClaim.promptHash !== request.promptHash
+    ) {
+      fail("Invocation audit does not match the prepared request and claim");
+    }
+    audited = { invocation, invocationClaim };
+  } else if ("agentCwd" in request) {
+    fail("Audited prepared requests require invocation launch audit evidence");
   }
   const result = validateFeedbackTriageOutput(agentOutput);
   if (!result.success) fail("Invalid triage output", result.diagnostics);
@@ -336,7 +528,8 @@ export async function validateAgentResult(
     requestId,
     output,
     artifactIds: request.artifactIds,
-    validatedAt: output.generatedAt,
+    ...(audited ?? {}),
+    validatedAt: audited ? now.toISOString() : output.generatedAt,
     authority: {
       sideEffects: "none",
       mayContactUsers: false,
@@ -347,6 +540,7 @@ export async function validateAgentResult(
 }
 
 type WriteContext = {
+  globalArgs?: z.input<typeof globalArgumentsSchema>;
   writeResource: (
     spec: string,
     name: string,
@@ -361,6 +555,7 @@ type WriteContext = {
 export const model = {
   type: "@mgreten/feedback-triage",
   version: FEEDBACK_TRIAGE_MODEL_VERSION,
+  globalArguments: globalArgumentsSchema,
   resources: {
     normalizedBatch: {
       description:
@@ -435,7 +630,11 @@ export const model = {
         context.logger.info("Preparing feedback request {requestId}", {
           requestId: args.requestId,
         });
-        const request = await prepareRequest(args.requestId, args.artifacts);
+        const request = await prepareRequest(
+          args.requestId,
+          args.artifacts,
+          context.globalArgs,
+        );
         const handle = await context.writeResource(
           "request",
           `request-${args.requestId}`,
@@ -458,10 +657,17 @@ export const model = {
         context.logger.info("Validating feedback triage {requestId}", {
           requestId: args.requestId,
         });
+        const audit = "invocation" in args
+          ? {
+            invocation: args.invocation,
+            invocationClaim: args.invocationClaim,
+          }
+          : undefined;
         const triage = await validateAgentResult(
           args.requestId,
           args.request,
           args.agentOutput,
+          audit,
         );
         const handle = await context.writeResource(
           "validatedTriage",

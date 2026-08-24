@@ -340,6 +340,9 @@ function leakageDiagnostics(input: unknown): ValidationDiagnostic[] {
   return diagnostics;
 }
 
+/** Scans already-structured data for private fields, leaked values, or action intent. */
+export const validateFeedbackContentSafety = leakageDiagnostics;
+
 function validate<T>(
   schema: z.ZodType<T>,
   input: unknown,

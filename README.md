@@ -13,8 +13,8 @@ or grant authority to act.
   than truncated or partially processed.
 - Pattern redaction detects common emails, telephone numbers, credentials,
   account identifiers, and street addresses. **Pattern redaction is not a PII
-  guarantee**: it cannot reliably identify every person, secret, identifier,
-  or private fact. Review redacted artifacts before any broader use.
+  guarantee**: it cannot reliably identify every person, secret, identifier, or
+  private fact. Review redacted artifacts before any broader use.
 - `prepare` builds a bounded deterministic prompt for a separately owned
   adapter. The prompt reiterates no-tool, no-contact, and no-authority rules.
 - `validate` treats returned output as untrusted and rejects leaked private
@@ -27,9 +27,12 @@ All resources use schema version `1.0`:
 
 - `normalizedBatch`: redacted artifacts only; its authority records that no
   agent or tools ran.
-- `request`: deterministic prompt, SHA-256 hash, and artifact IDs. It contains
-  no adapter credentials, working directory, or provider-specific audit data.
-- `validatedTriage`: a validated, untrusted, recommendation-only output.
+- `request`: deterministic prompt, SHA-256 hash, and artifact IDs. Direct
+  adapter-free preparation omits adapter data; configured Swamp instances also
+  retain their bounded `/tmp` working directory for launch-audit compatibility.
+- `validatedTriage`: a validated, untrusted, recommendation-only output. Strict
+  adapter-free and audited modes are accepted; invocation and readonly sandbox
+  claim evidence is preserved only when the complete audited mode is supplied.
 
 Resource IDs are stable logical names (`normalized-`, `request-`, and `triage-`
 plus `requestId`) in Swamp's versioned store. Given identical validated inputs,
@@ -39,10 +42,11 @@ agent output time. Reusing a request ID may create another identical stored
 version; callers that require write-once semantics must reuse the previously
 returned data handle or choose a unique ID.
 
-The model is intentionally adapter-free. A caller that sends `request.prompt`
-to an agent is responsible for its provider, sandbox, transport, and audit
-trail. Feed its response into `validate`; do not treat a valid result as an
-authorization to contact users, call tools, or make external changes.
+The model is intentionally adapter-free: it neither owns nor invokes an adapter.
+A caller that sends `request.prompt` to an agent is responsible for its
+provider, sandbox, transport, and audit trail. Feed its response into
+`validate`; do not treat a valid result as an authorization to contact users,
+call tools, or make external changes.
 
 ## Use
 
